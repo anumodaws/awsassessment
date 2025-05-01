@@ -1,0 +1,108 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Lambda function to process vehicle sensor data from Kinesis, evaluate speed violations, publish to SQS, and write to DynamoDB.
+
+Parameters:
+
+  Environment:
+    Type: String
+    Default: prod
+
+  VehicleKinesisStreamArnExportName:
+    Type: String
+    Description: Export name of Kinesis stream ARN from shared template
+
+  VehicleDynamoDBTableExportName:
+    Type: String
+    Description: Export name of DynamoDB table name from shared template
+
+  VehicleAlertSQSArn:
+    Type: String
+    Description: ARN of the SQS Queue to send alerts
+
+  VehicleAlertSQSName:
+    Type: String
+    Description: Name of the SQS Queue
+
+  LambdaCodeS3Bucket:
+    Type: String
+    Description: S3 bucket storing lambda source code
+
+  LambdaCodeS3Key:
+    Type: String
+    Description: S3 key (path) to lambda .zip
+
+Resources:
+
+  ## -----------------------
+  ## IAM Role for Lambda
+  ## -----------------------
+  VehicleDataProcessingLambdaRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${Environment}-VehicleProcessorLambdaRole"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: KinesisToDynamoAndSQS
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - kinesis:GetRecords
+                  - kinesis:GetShardIterator
+                  - kinesis:DescribeStream
+                  - kinesis:ListStreams
+                Resource: !ImportValue VehicleKinesisStreamArnExportName
+              - Effect: Allow
+                Action:
+                  - dynamodb:PutItem
+                  - dynamodb:UpdateItem
+                Resource: !Sub "arn:aws:dynamodb:${AWS::Region}:${AWS::AccountId}:table/${!ImportValue VehicleDynamoDBTableExportName}"
+              - Effect: Allow
+                Action:
+                  - sqs:SendMessage
+                Resource: !Ref VehicleAlertSQSArn
+              - Effect: Allow
+                Action:
+                  - logs:CreateLogGroup
+                  - logs:CreateLogStream
+                  - logs:PutLogEvents
+                Resource: "*"
+
+  ## -----------------------
+  ## Lambda Function
+  ## -----------------------
+  VehicleDataProcessingFunction:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Sub "${Environment}-VehicleSensorProcessor"
+      Handler: lambda_function.lambda_handler
+      Role: !GetAtt VehicleDataProcessingLambdaRole.Arn
+      Runtime: python3.12
+      Timeout: 30
+      MemorySize: 256
+      Code:
+        S3Bucket: !Ref LambdaCodeS3Bucket
+        S3Key: !Ref LambdaCodeS3Key
+      Environment:
+        Variables:
+          ALERT_QUEUE_URL: !Sub "https://sqs.${AWS::Region}.amazonaws.com/${AWS::AccountId}/${VehicleAlertSQSName}"
+          SPEED_THRESHOLD: "100"
+          DYNAMODB_TABLE_NAME: !ImportValue VehicleDynamoDBTableExportName
+
+  ## -----------------------
+  ## Event Source Mapping
+  ## -----------------------
+  VehicleKinesisEventMapping:
+    Type: AWS::Lambda::EventSourceMapping
+    Properties:
+      EventSourceArn: !ImportValue VehicleKinesisStreamArnExportName
+      FunctionName: !Ref VehicleDataProcessingFunction
+      StartingPosition: LATEST
+      BatchSize: 100

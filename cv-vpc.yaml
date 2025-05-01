@@ -1,0 +1,341 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: VPC Architecture for Secure Vehicle Connectivity with Parameters and AZ Mapping
+
+Parameters:
+
+  VpcCidr:
+    Type: String
+    Default: 10.0.0.0/16
+    Description: CIDR block for the VPC
+
+  PublicSubnetCidr:
+    Type: String
+    Default: 10.0.0.0/24
+    Description: CIDR for public subnet
+
+  BatchSubnetCidr:
+    Type: String
+    Default: 10.0.1.0/24
+
+  RealtimeSubnetCidr:
+    Type: String
+    Default: 10.0.2.0/24
+
+  VideoSubnetCidr:
+    Type: String
+    Default: 10.0.3.0/24
+
+  CommandSubnetCidr:
+    Type: String
+    Default: 10.0.4.0/24
+
+  EnvironmentName:
+    Type: String
+    Default: dev
+    AllowedValues: [dev, staging, prod]
+
+Mappings:
+
+  AvailabilityZoneConfig:
+    ap-south-1:
+      AZ1: ap-south-1a
+      AZ2: ap-south-1b
+      AZ3: ap-south-1c
+    us-east-1:
+      AZ1: us-east-1a
+      AZ2: us-east-1b
+      AZ3: us-east-1c
+
+Resources:
+
+  CVDPVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VpcCidr
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: !Sub "${EnvironmentName}-ConnectedVehiclesVPC"
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+
+  AttachGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref CVDPVPC
+      InternetGatewayId: !Ref InternetGateway
+
+  PublicSubnet:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref CVDPVPC
+      CidrBlock: !Ref PublicSubnetCidr
+      MapPublicIpOnLaunch: false
+      AvailabilityZone: !FindInMap [ AvailabilityZoneConfig, !Ref "AWS::Region", AZ1 ]
+
+      Tags:
+        - Key: Name
+          Value: !Sub "${EnvironmentName}-PublicSubnet"
+
+  NatEIP:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+
+  NatGateway:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt NatEIP.AllocationId
+      SubnetId: !Ref PublicSubnet
+
+  # Private Subnets
+  PrivateSubnetBatch:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref CVDPVPC
+      CidrBlock: !Ref BatchSubnetCidr
+      AvailabilityZone: !FindInMap [ AvailabilityZoneConfig, !Ref "AWS::Region", AZ1 ]
+      Tags:
+        - Key: Name
+          Value: !Sub "${EnvironmentName}-PrivateSubnetBatch"
+
+  PrivateSubnetRealtime:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref CVDPVPC
+      CidrBlock: !Ref RealtimeSubnetCidr
+      AvailabilityZone: !FindInMap [ AvailabilityZoneConfig, !Ref "AWS::Region", AZ2 ]
+      Tags:
+        - Key: Name
+          Value: !Sub "${EnvironmentName}-PrivateSubnetRealtime"
+
+  PrivateSubnetVideo:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref CVDPVPC
+      CidrBlock: !Ref VideoSubnetCidr
+      AvailabilityZone: !FindInMap [ AvailabilityZoneConfig, !Ref "AWS::Region", AZ3 ]
+      Tags:
+        - Key: Name
+          Value: !Sub "${EnvironmentName}-PrivateSubnetVideo"
+
+  PrivateSubnetCommand:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref CVDPVPC
+      CidrBlock: !Ref CommandSubnetCidr
+      AvailabilityZone: !FindInMap [ AvailabilityZoneConfig, !Ref "AWS::Region", AZ1 ]
+      Tags:
+        - Key: Name
+          Value: !Sub "${EnvironmentName}-PrivateSubnetCommand"
+
+  # Route Tables
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref CVDPVPC
+
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: AttachGateway
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicRouteAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet
+      RouteTableId: !Ref PublicRouteTable
+
+  PrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref CVDPVPC
+
+  PrivateRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGateway
+
+  BatchRouteAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnetBatch
+      RouteTableId: !Ref PrivateRouteTable
+
+  RealtimeRouteAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnetRealtime
+      RouteTableId: !Ref PrivateRouteTable
+
+  VideoRouteAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnetVideo
+      RouteTableId: !Ref PrivateRouteTable
+
+  CommandRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref CVDPVPC
+
+  CommandRouteAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnetCommand
+      RouteTableId: !Ref CommandRouteTable
+      Tags:
+        - Key: Name
+          Value: !Sub "${EnvironmentName}-CommandRouteTable"
+# Security Groups
+  PublicSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for public subnet
+      VpcId: !Ref MyVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: !Ref SSHLocation
+          Description: Allow SSH access from specified IP range
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+          Description: Allow HTTP access from anywhere
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+          Description: Allow HTTPS access from anywhere
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+          Description: Allow all outbound traffic
+      Tags:
+        - Key: Name
+          Value: !Sub "${EnvironmentName}-PublicSecurityGroup"
+
+  BatchSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for batch data processing subnet
+      VpcId: !Ref MyVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          SourceSecurityGroupId: !Ref PublicSecurityGroup
+          Description: Allow SSH access from public subnet
+        - IpProtocol: tcp
+          FromPort: 1024
+          ToPort: 65535
+          SourceSecurityGroupId: !Ref PublicSecurityGroup
+          Description: Allow application traffic from public subnet
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+          Description: Allow all outbound traffic
+      Tags:
+        - Key: Name
+          Value: !Sub "${EnvironmentName}-BatchSecurityGroup"
+
+  RealtimeSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for realtime data processing subnet
+      VpcId: !Ref MyVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          SourceSecurityGroupId: !Ref PublicSecurityGroup
+          Description: Allow SSH access from public subnet
+        - IpProtocol: tcp
+          FromPort: 1024
+          ToPort: 65535
+          SourceSecurityGroupId: !Ref PublicSecurityGroup
+          Description: Allow application traffic from public subnet
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+          Description: Allow all outbound traffic
+      Tags:
+        - Key: Name
+          Value: !Sub "${EnvironmentName}-RealtimeSecurityGroup"
+
+  VideoSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for video data processing subnet
+      VpcId: !Ref MyVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          SourceSecurityGroupId: !Ref PublicSecurityGroup
+          Description: Allow SSH access from public subnet
+        - IpProtocol: tcp
+          FromPort: 1024
+          ToPort: 65535
+          SourceSecurityGroupId: !Ref PublicSecurityGroup
+          Description: Allow application traffic from public subnet
+        - IpProtocol: udp
+          FromPort: 1024
+          ToPort: 65535
+          SourceSecurityGroupId: !Ref PublicSecurityGroup
+          Description: Allow UDP video streaming from public subnet
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+          Description: Allow all outbound traffic
+      Tags:
+        - Key: Name
+          Value: !Sub "${EnvironmentName}-VideoSecurityGroup"
+
+  CommandSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for command channel subnet (isolated)
+      VpcId: !Ref MyVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          SourceSecurityGroupId: !Ref PublicSecurityGroup
+          Description: Allow SSH access from public subnet only for administration
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          SourceSecurityGroupId: !Ref PublicSecurityGroup
+          Description: Allow HTTPS access from public subnet only
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: !Ref VpcCidr
+          Description: Allow outbound traffic only within VPC
+      Tags:
+        - Key: Name
+          Value: !Sub "${EnvironmentName}-CommandSecurityGroup"
+
+Outputs:
+
+  VPCId:
+    Value: !Ref CVDPVPC
+  PublicSubnet:
+    Value: !Ref PublicSubnet
+  PrivateBatch:
+    Value: !Ref PrivateSubnetBatch
+  PrivateRealtime:
+    Value: !Ref PrivateSubnetRealtime
+  PrivateVideo:
+    Value: !Ref PrivateSubnetVideo
+  PrivateCommand:
+    Value: !Ref PrivateSubnetCommand

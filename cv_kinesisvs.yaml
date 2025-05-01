@@ -1,0 +1,91 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: >
+  Creates Kinesis Video Stream for ingesting vehicle camera feeds, and IAM role/policy
+  for allowing containerized microservice (from ECR) to consume video data.
+
+Parameters:
+
+  Environment:
+    Type: String
+    Default: prod
+
+  VideoStreamName:
+    Type: String
+    Default: VehicleCameraStream
+    Description: Name of the Kinesis Video Stream
+
+  DataRetentionInHours:
+    Type: Number
+    Default: 24
+    Description: How long data is retained in the stream
+
+  MediaType:
+    Type: String
+    Default: video/h264
+    Description: Media type for the video stream
+
+Resources:
+
+  ## -----------------------------
+  ## Kinesis Video Stream
+  ## -----------------------------
+  VehicleCameraVideoStream:
+    Type: AWS::KinesisVideo::Stream
+    Properties:
+      Name: !Sub "${Environment}-${VideoStreamName}"
+      DataRetentionInHours: !Ref DataRetentionInHours
+      MediaType: !Ref MediaType
+      StreamEncryption:
+        EncryptionType: KMS
+        KeyId: alias/aws/kinesisvideo
+
+  ## -----------------------------
+  ## IAM Role for Microservice
+  ## -----------------------------
+  VideoStreamConsumerRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${Environment}-KVS-ConsumerRole"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service:
+                - ecs-tasks.amazonaws.com
+                - eks.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: KinesisVideoConsumerPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - kinesisvideo:GetDataEndpoint
+                  - kinesisvideo:GetMedia
+                  - kinesisvideo:GetMediaForFragmentList
+                  - kinesisvideo:ListFragments
+                  - kinesisvideo:GetHLSStreamingSessionURL
+                  - kinesisvideo:GetDASHStreamingSessionURL
+                Resource: !GetAtt VehicleCameraVideoStream.Arn
+
+Outputs:
+
+  KinesisVideoStreamName:
+    Description: Name of the video stream
+    Value: !Ref VehicleCameraVideoStream
+    Export:
+      Name: !Sub "${Environment}-VideoStreamName"
+
+  KinesisVideoStreamArn:
+    Description: ARN of the Kinesis Video Stream
+    Value: !GetAtt VehicleCameraVideoStream.Arn
+    Export:
+      Name: !Sub "${Environment}-VideoStreamArn"
+
+  KVSConsumerRoleArn:
+    Description: IAM role ARN for microservice to access KVS
+    Value: !GetAtt VideoStreamConsumerRole.Arn
+    Export:
+      Name: !Sub "${Environment}-KVSConsumerRoleArn"

@@ -1,0 +1,138 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Creates data storage resources (DynamoDB & S3) for connected vehicle system.
+
+Parameters:
+
+  Environment:
+    Type: String
+    Default: prod
+
+  ReplicationRegion:
+    Type: String
+    Description: Region to replicate DynamoDB table to
+
+  S3DataRetentionDays:
+    Type: Number
+    Default: 30
+    Description: Number of days to retain data in S3 before expiration
+
+Resources:
+
+  ## ------------------------
+  ## DynamoDB Table
+  ## ------------------------
+  VehicleDataDynamoTable:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Sub "${Environment}-VehicleData"
+      AttributeDefinitions:
+        - AttributeName: vehicle_id
+          AttributeType: S
+        - AttributeName: timestamp
+          AttributeType: S
+      KeySchema:
+        - AttributeName: vehicle_id
+          KeyType: HASH
+        - AttributeName: timestamp
+          KeyType: RANGE
+      BillingMode: PAYPERREQUEST
+      StreamSpecification:
+        StreamViewType: NEW_AND_OLD_IMAGES
+      SSESpecification:
+        SSEEnabled: true
+      Replicas:
+        - Region: !Ref ReplicationRegion
+
+  ## ------------------------
+  ## IAM Role for Replication
+  ## ------------------------
+  DynamoDBReplicationRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${Environment}-DynamoReplicationRole"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: dynamodb.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: DynamoReplicationPolicy
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - dynamodb:CreateTable
+                  - dynamodb:DescribeTable
+                  - dynamodb:UpdateTable
+                  - dynamodb:ListTables
+                Resource: "*"
+
+  ## ------------------------
+  ## S3 Bucket for Batch Storage
+  ## ------------------------
+  VehicleBatchDataBucket:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Sub "${Environment}-vehicle-batch-data-${AWS::Region}"
+      VersioningConfiguration:
+        Status: Enabled
+      LifecycleConfiguration:
+        Rules:
+          - Id: TransitionAndExpire
+            Status: Enabled
+            Transitions:
+              - StorageClass: GLACIER
+                TransitionInDays: 7
+            ExpirationInDays: !Ref S3DataRetentionDays
+      BucketEncryption:
+        ServerSideEncryptionConfiguration:
+          - ServerSideEncryptionByDefault:
+              SSEAlgorithm: AES256
+      PublicAccessBlockConfiguration:
+        BlockPublicAcls: true
+        BlockPublicPolicy: true
+        IgnorePublicAcls: true
+        RestrictPublicBuckets: true
+
+  ## ------------------------
+  ## S3 Bucket Policy
+  ## ------------------------
+  VehicleBatchBucketPolicy:
+    Type: AWS::S3::BucketPolicy
+    Properties:
+      Bucket: !Ref VehicleBatchDataBucket
+      PolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Sid: AllowGetPutByServices
+            Effect: Allow
+            Principal:
+              Service: iot.amazonaws.com
+            Action:
+              - s3:PutObject
+            Resource: !Sub "${VehicleBatchDataBucket.Arn}/*"
+
+Outputs:
+
+  DynamoDBTableName:
+    Value: !Ref VehicleDataDynamoTable
+    Export:
+      Name: VehicleDynamoDBTableName
+
+  DynamoDBTableArn:
+    Value: !GetAtt VehicleDataDynamoTable.Arn
+    Export:
+      Name: VehicleDynamoDBTableArn
+
+  S3BucketName:
+    Value: !Ref VehicleBatchDataBucket
+    Export:
+      Name: VehicleBatchS3BucketName
+
+  S3BucketArn:
+    Value: !GetAtt VehicleBatchDataBucket.Arn
+    Export:
+      Name: VehicleBatchS3BucketArn

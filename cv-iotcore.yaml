@@ -1,0 +1,235 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: IoT ingestion pipeline for connected vehicles (cross-stack S3/Kinesis references)
+
+Parameters:
+
+  Environment:
+    Type: String
+    Default: prod
+
+  RealtimeStreamExportName:
+    Type: String
+    Description: Export name of the Kinesis stream ARN from the shared stack
+
+  # amazonq-ignore-next-line
+  BatchS3BucketExportName:
+    Type: String
+    Description: Export name of the S3 bucket name from the shared stack
+
+  ProvisioningTemplateName:
+    Type: String
+    Default: CVDPProvisioningTemplate
+
+  IotThingTypeName:
+    Type: String
+    Default: ConnectedVehicle
+
+Resources:
+
+  ## ------------------------
+  ## IoT Thing Type
+  ## ------------------------
+  VehicleThingType:
+    Type: AWS::IoT::ThingType
+    Properties:
+      ThingTypeName: !Ref IotThingTypeName
+
+  ## ------------------------
+  ## IAM Roles for Rules
+  ## ------------------------
+
+  IoTRuleKinesisRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${Environment}-IoTToKinesisRole"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: iot.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: AllowKinesisPut
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: kinesis:PutRecord
+                Resource: !ImportValue
+                  Ref: RealtimeStreamExportName
+
+  IoTRuleS3Role:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${Environment}-IoTToS3Role"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: iot.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: AllowS3Put
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - s3:PutObject
+                    s3:GetObject
+                    s3:ListBucket
+                # amazonq-ignore-next-line
+                Resource: !Sub "arn:aws:s3:::${!ImportValue BatchS3BucketExportName}/*"
+
+  ## ------------------------
+  ## IoT Topic Rules
+  ## ------------------------
+
+  RealtimeRule:
+    Type: AWS::IoT::TopicRule
+    Properties:
+      RuleName: !Sub "${Environment}-RealtimeRule"
+      TopicRulePayload:
+        RuleDisabled: false
+        Sql: "SELECT * FROM 'vehicle/header' WHERE type = 'realtime'"
+        Actions:
+          - Kinesis:
+              RoleArn: !GetAtt IoTRuleKinesisRole.Arn
+              StreamName: !Select [1, !Split ["/", !ImportValue RealtimeStreamExportName]]
+              PartitionKey: "${vehicle_id}"
+
+  BatchRule:
+    Type: AWS::IoT::TopicRule
+    Properties:
+      RuleName: !Sub "${Environment}-BatchRule"
+      TopicRulePayload:
+        RuleDisabled: false
+        Sql: "SELECT * FROM 'vehicle/header' WHERE type = 'batch'"
+        Actions:
+          - S3:
+              RoleArn: !GetAtt IoTRuleS3Role.Arn
+              BucketName: !ImportValue BatchS3BucketExportName
+              Key: "batch_data/${vehicle_id}/${timestamp()}.json"
+
+  ## ------------------------
+  ## IoT Provisioning Template
+  ## ------------------------
+
+  ProvisioningTemplate:
+    Type: AWS::IoT::ProvisioningTemplate
+    Properties:
+      TemplateName: !Ref ProvisioningTemplateName
+      Enabled: true
+      ProvisioningRoleArn: !GetAtt ProvisioningRole.Arn
+      TemplateBody: !Sub |
+        {
+          "Parameters": {
+            "macId": {
+              "Type": "String"
+            }
+          },
+          "Resources": {
+            "thing": {
+              "Type": "AWS::IoT::Thing",
+              "Properties": {
+                "ThingName": {"Ref": "macId"},
+                "ThingTypeName": "${IotThingTypeName}"
+              }
+            },
+            "certificate": {
+              "Type": "AWS::IoT::Certificate",
+              "Properties": {
+                "Status": "ACTIVE"
+              }
+            },
+            "policy": {
+              "Type": "AWS::IoT::Policy",
+              "Properties": {
+                "PolicyName": "${Environment}_VehiclePolicy",
+                "PolicyDocument": {
+                  "Version": "2012-10-17",
+                  "Statement": [
+                    {
+                      "Effect": "Allow",
+                      "Action": [
+                        "iot:Connect"
+                      ],
+                      "Resource": "*"
+                    },
+                    {
+                      "Effect": "Allow",
+                      "Action": [
+                        "iot:Publish",
+                        "iot:Receive"
+                      ],
+                      "Resource": [
+                        "arn:aws:iot:*:*:topic/vehicle/data/${iot:Connection.Thing.ThingName}"
+                      ]
+                    },
+                    {
+                      "Effect": "Allow",
+                      "Action": [
+                        "iot:Subscribe"
+                      ],
+                      "Resource": [
+                        "arn:aws:iot:*:*:topicfilter/vehicle/command/${iot:Connection.Thing.ThingName}"
+                      ]
+                    },
+                    {
+                      "Effect": "Allow",
+                      "Action": [
+                        "iot:GetThingShadow",
+                        "iot:UpdateThingShadow",
+                        "iot:DeleteThingShadow"
+                      ],
+                      "Resource": [
+                        "arn:aws:iot:*:*:thing/${iot:Connection.Thing.ThingName}"
+                      ]
+                    }
+                  ]
+                }
+              }
+            }
+          }
+        }
+
+  ProvisioningRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${Environment}-ProvisioningRole"
+      AssumeRolePolicyDocument:
+        Version: '2012-10-17'
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: iot.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: IoTProvisioningPolicy
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - Effect: Allow
+                Action:
+                  - iot:CreateThing
+                  - iot:CreatePolicy
+                  - iot:AttachPolicy
+                  - iot:AttachThingPrincipal
+                  - iot:CreateKeysAndCertificate
+                Resource: "*"
+
+Outputs:
+
+  RealtimeRuleName:
+    Value: !Ref RealtimeRule
+
+  BatchRuleName:
+    Value: !Ref BatchRule
+
+  ProvisioningTemplateName:
+    Value: !Ref ProvisioningTemplate
+
+  ThingTypeName:
+    Value: !Ref VehicleThingType

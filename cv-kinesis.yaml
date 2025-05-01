@@ -1,0 +1,177 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Kinesis For Vehicle Data Platform
+
+Parameters:
+
+  EnvironmentName:
+    Type: String
+    Default: dev
+
+  IotTopicName:
+    Type: String
+    Default: vehicle/telematics
+
+  KinesisStreamName:
+    Type: String
+    Default: CVDPStream
+
+  DeliveryBucketName:
+    Type: String
+    Default: cvdp-stream-data
+
+  LambdaFunctionName:
+    Type: String
+    Default: ProcessRealtimeData
+
+  RealtimeSubnetId:
+    Type: AWS::EC2::Subnet::Id
+    Description: Subnet ID for PrivateSubnetRealtime
+
+  VpcId:
+    Type: AWS::EC2::VPC::Id
+    Description: VPC ID (CVDPVPC)
+
+  LambdaCodeS3Bucket:
+    Type: String
+
+    Description: S3 bucket where Lambda ZIP (from GitHub) is stored
+
+  LambdaCodeS3Key:
+    Type: String
+    Description: Path/key of Lambda ZIP file in the S3 bucket
+
+Mappings:
+
+  AvailabilityZoneConfig:
+    ap-south-1:
+      AZ1: ap-south-1a
+      AZ2: ap-south-1b
+    us-east-1:
+      AZ1: us-east-1a
+      AZ2: us-east-1b
+
+Resources:
+
+  DataStream:
+    Type: AWS::Kinesis::Stream
+    Properties:
+      Name: !Ref KinesisStreamName
+      ShardCount: 1
+      RetentionPeriodHours: 24
+      StreamEncryption:
+        EncryptionType: KMS
+        KeyId: alias/aws/kinesis
+
+  IotToKinesisRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${EnvironmentName}-IoTToKinesisRole"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: iot.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: AllowPutToKinesis
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: kinesis:PutRecord
+                Resource: !GetAtt DataStream.Arn
+
+  IotTopicRule:
+    Type: AWS::IoT::TopicRule
+    Properties:
+      RuleName: !Sub "${EnvironmentName}-IoTToKinesis"
+      TopicRulePayload:
+        RuleDisabled: false
+        Sql: !Sub "SELECT * FROM '${IotTopicName}'"
+        Actions:
+          - Kinesis:
+              RoleArn: !GetAtt IotToKinesisRole.Arn
+              StreamName: !Ref KinesisStreamName
+              PartitionKey: "${newuuid()}"
+
+  RealtimeBucket:
+    # amazonq-ignore-next-line
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Ref DeliveryBucketName
+
+  LambdaExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: !Sub "${EnvironmentName}-LambdaExecRole"
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: lambda.amazonaws.com
+            Action: sts:AssumeRole
+      Policies:
+        - PolicyName: AllowStreamAndS3
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action:
+                  - kinesis:GetRecords
+                  - kinesis:GetShardIterator
+                  - kinesis:DescribeStream
+                  - kinesis:ListStreams
+                Resource: !GetAtt DataStream.Arn
+              - Effect: Allow
+                Action:
+                  - s3:PutObject
+                Resource: !Sub "arn:aws:s3:::${DeliveryBucketName}/*"
+              - Effect: Allow
+                Action:
+                  - logs:*
+                Resource: "*"
+
+  RealtimeLambda:
+    Type: AWS::Lambda::Function
+    Properties:
+      FunctionName: !Ref LambdaFunctionName
+      Handler: index.handler
+      Role: !GetAtt LambdaExecutionRole.Arn
+      Runtime: python3.9
+      Timeout: 30
+      Code:
+        S3Bucket: !Ref LambdaCodeS3Bucket
+        S3Key: !Ref LambdaCodeS3Key
+
+  LambdaEventSource:
+    Type: AWS::Lambda::EventSourceMapping
+    Properties:
+      BatchSize: 100
+      EventSourceArn: !GetAtt DataStream.Arn
+      FunctionName: !Ref RealtimeLambda
+      StartingPosition: LATEST
+      Enabled: true
+
+  KinesisVPCEndpoint:
+    Type: AWS::EC2::VPCEndpoint
+    Properties:
+      ServiceName: !Sub "com.amazonaws.${AWS::Region}.kinesis"
+      VpcId: !Ref VpcId
+      SubnetIds:
+        - !Ref RealtimeSubnetId
+      VpcEndpointType: Interface
+      PrivateDnsEnabled: true
+      SecurityGroupIds: []
+
+Outputs:
+
+  KinesisStream:
+    Value: !Ref DataStream
+  BucketName:
+    Value: !Ref RealtimeBucket
+  LambdaFunction:
+    Value: !Ref RealtimeLambda
+  IotRuleName:
+    Value: !Ref IotTopicRule
